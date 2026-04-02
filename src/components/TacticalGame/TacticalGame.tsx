@@ -16,7 +16,8 @@ import {
   Users,
   User,
   X,
-  MessageSquare
+  MessageSquare,
+  AlertTriangle
 } from 'lucide-react';
 import { TacticalCard, TacticalGameState, TacticalPlayer, RoomInfo } from '../../types';
 import { createDeck, CARD_POOL } from '../../data/cards';
@@ -87,7 +88,11 @@ export const TacticalGame: React.FC<TacticalGameProps> = ({ onExit }) => {
   const toSharedUrl = (url: string) => {
     if (!url) return '';
     // AI Studio pattern: dev URL has -dev-, shared URL has -pre-
-    return url.replace('ais-dev-', 'ais-pre-').replace('-dev-', '-pre-');
+    // Also handle ais-dev- to ais-pre-
+    let normalized = url.replace('ais-dev-', 'ais-pre-').replace('-dev-', '-pre-');
+    // Ensure no trailing slash for consistency
+    if (normalized.endsWith('/')) normalized = normalized.slice(0, -1);
+    return normalized;
   };
 
   // Fetch config
@@ -95,13 +100,17 @@ export const TacticalGame: React.FC<TacticalGameProps> = ({ onExit }) => {
     fetch('/api/config')
       .then(res => res.json())
       .then(data => {
+        console.log('Fetched config:', data);
         const normalizedSharedUrl = toSharedUrl(data.sharedAppUrl || window.location.origin);
+        console.log('Normalized Shared URL:', normalizedSharedUrl);
         setSharedAppUrl(normalizedSharedUrl);
-        setSocketServerUrl(normalizedSharedUrl);
+        setSocketServerUrl(normalizedSharedUrl); // Force socketServerUrl = sharedAppUrl
       })
       .catch(err => {
-        console.warn('Failed to fetch config, falling back to local origin:', err);
-        setSocketServerUrl(window.location.origin);
+        console.warn('Failed to fetch config, falling back to normalized local origin:', err);
+        const fallbackUrl = toSharedUrl(window.location.origin);
+        setSharedAppUrl(fallbackUrl);
+        setSocketServerUrl(fallbackUrl);
       });
   }, []);
 
@@ -119,7 +128,7 @@ export const TacticalGame: React.FC<TacticalGameProps> = ({ onExit }) => {
       reconnectionAttempts: Infinity,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
-      timeout: 20000,
+      timeout: 10000,
       withCredentials: false,
       forceNew: true
     });
@@ -220,9 +229,12 @@ export const TacticalGame: React.FC<TacticalGameProps> = ({ onExit }) => {
 
   const createRoom = () => {
     // If we are on dev/private instance, redirect to shared instance to create room
-    if (sharedAppUrl && window.location.origin !== sharedAppUrl) {
-      console.log('Redirecting to shared instance for room creation:', sharedAppUrl);
-      window.location.href = `${sharedAppUrl}/?createRoom=1`;
+    const currentOrigin = window.location.origin.replace(/\/$/, '');
+    const targetOrigin = sharedAppUrl.replace(/\/$/, '');
+    
+    if (targetOrigin && currentOrigin !== targetOrigin) {
+      console.log('Redirecting to shared instance for room creation:', targetOrigin);
+      window.location.href = `${targetOrigin}/?createRoom=1`;
       return;
     }
 
@@ -256,6 +268,7 @@ export const TacticalGame: React.FC<TacticalGameProps> = ({ onExit }) => {
 
   // Handle room query parameter
   useEffect(() => {
+    // Only process query params once connected
     if (connectionStatus !== 'connected') return;
 
     const params = new URLSearchParams(window.location.search);
@@ -268,7 +281,12 @@ export const TacticalGame: React.FC<TacticalGameProps> = ({ onExit }) => {
       const url = new URL(window.location.href);
       url.searchParams.delete('createRoom');
       window.history.replaceState({}, document.title, url.toString());
-      createRoom();
+      
+      // Small delay to ensure everything is stable
+      const timer = setTimeout(() => {
+        createRoom();
+      }, 300);
+      return () => clearTimeout(timer);
     } else if (roomId) {
       setJoinRoomId(roomId);
       console.log('Joining room from URL:', roomId);
@@ -278,7 +296,7 @@ export const TacticalGame: React.FC<TacticalGameProps> = ({ onExit }) => {
       }, 500);
       return () => clearTimeout(timer);
     }
-  }, [joinRoom]);
+  }, [connectionStatus, joinRoom]); // Added connectionStatus as dependency
 
   const addLog = (msg: string) => {
     setHistory(prev => [msg, ...prev].slice(0, 50));
@@ -555,7 +573,6 @@ export const TacticalGame: React.FC<TacticalGameProps> = ({ onExit }) => {
       setSelectedCardIndex(null);
       setSpellAnimation(null);
       
-      // 按原版复刻的已知问题：roomInfo.id 应该其实是 roomInfo.roomId，但源码就是这样写的。
       socketRef.current?.emit('remote_action', { 
         roomId: (roomInfo as any)?.id || roomInfo?.roomId, 
         action: { type: 'spell', card, targets: card.id.includes('fire') ? [ai.slots.findIndex(s => s !== null)] : [0, 1, 2, 3] } 
@@ -744,6 +761,8 @@ export const TacticalGame: React.FC<TacticalGameProps> = ({ onExit }) => {
 
   // UI Helpers
   if (!gameMode) {
+    const isWrongOrigin = sharedAppUrl && window.location.origin.replace(/\/$/, '') !== sharedAppUrl.replace(/\/$/, '');
+
     return (
       <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4 font-sans">
         <div className="max-w-md w-full bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl relative">
@@ -762,6 +781,15 @@ export const TacticalGame: React.FC<TacticalGameProps> = ({ onExit }) => {
           <h1 className="text-4xl font-bold text-white mb-2 text-center tracking-tight italic">神话战阵</h1>
           <p className="text-slate-400 text-center mb-8 text-sm uppercase tracking-widest">战术卡牌对决</p>
           
+          {isWrongOrigin && (
+            <div className="mb-6 p-3 bg-amber-950/20 border border-amber-900/30 rounded-xl flex gap-3 items-start">
+              <AlertTriangle className="text-amber-500 shrink-0" size={18} />
+              <div className="text-[10px] text-amber-200/70 leading-relaxed">
+                当前不是共享实例，多人模式可能受限。创建房间时将自动跳转到共享实例。
+              </div>
+            </div>
+          )}
+
           <div className="space-y-4">
             <button 
               onClick={handleStartSinglePlayer}
@@ -778,9 +806,9 @@ export const TacticalGame: React.FC<TacticalGameProps> = ({ onExit }) => {
 
             <button 
               onClick={createRoom}
-              disabled={isCreatingRoom || connectionStatus !== 'connected'}
+              disabled={isCreatingRoom}
               className={`w-full py-4 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-bold transition-all transform hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-3 text-sm ${
-                (isCreatingRoom || connectionStatus !== 'connected') ? 'opacity-50 cursor-not-allowed' : ''
+                isCreatingRoom ? 'opacity-50 cursor-not-allowed' : ''
               }`}
             >
               {isCreatingRoom ? (
@@ -823,21 +851,51 @@ export const TacticalGame: React.FC<TacticalGameProps> = ({ onExit }) => {
             返回主菜单
           </button>
 
+          {/* Diagnostic Info */}
+          <div className="mt-8 pt-6 border-t border-slate-800/50">
+            <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-[8px] font-mono text-slate-600 uppercase tracking-tighter">
+              <div>Origin:</div>
+              <div className="text-right truncate">{window.location.origin}</div>
+              <div>Shared:</div>
+              <div className="text-right truncate">{sharedAppUrl || 'Loading...'}</div>
+              <div>Socket:</div>
+              <div className="text-right truncate">{socketServerUrl || 'Loading...'}</div>
+              <div>Status:</div>
+              <div className={`text-right ${connectionStatus === 'connected' ? 'text-emerald-500' : 'text-amber-500'}`}>{connectionStatus}</div>
+            </div>
+          </div>
+
           {connectionStatus === 'error' && lastError && (
             <div className="mt-6 p-4 bg-red-950/20 border border-red-900/30 rounded-2xl text-center">
-              <div className="text-[10px] text-red-400 font-mono mb-2">
+              <div className="text-[10px] text-red-400 font-mono mb-1">
                 连接失败: {lastError}
               </div>
-              <p className="text-[9px] text-slate-500 uppercase tracking-tighter leading-relaxed">
+              <div className="text-[8px] text-slate-500 font-mono mb-3 break-all opacity-50">
+                目标: {socketServerUrl}
+              </div>
+              <p className="text-[9px] text-slate-500 uppercase tracking-tighter leading-relaxed mb-4">
                 提示: 请确保已点击“分享”按钮并刷新页面。<br/>
-                如果仍然失败，请检查共享实例是否已成功启动。
+                如果共享实例未启动，多人模式将无法工作。
               </p>
-              <button 
-                onClick={() => window.location.reload()}
-                className="mt-3 px-4 py-1 bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-300 rounded-lg transition-colors border border-slate-700"
-              >
-                刷新重试
-              </button>
+              <div className="flex gap-2 justify-center">
+                <button 
+                  onClick={() => window.location.reload()}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-300 rounded-lg transition-colors border border-slate-700"
+                >
+                  刷新重试
+                </button>
+                {socketServerUrl !== window.location.origin && (
+                  <button 
+                    onClick={() => {
+                      setSocketServerUrl(window.location.origin);
+                      setLastError(null);
+                    }}
+                    className="px-4 py-2 bg-indigo-900/40 hover:bg-indigo-900/60 text-[10px] text-indigo-300 rounded-lg transition-colors border border-indigo-800/50"
+                  >
+                    切换到本地连接
+                  </button>
+                )}
+              </div>
             </div>
           )}
         </div>
